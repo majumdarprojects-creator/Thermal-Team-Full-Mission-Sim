@@ -11,6 +11,11 @@ from astropy.coordinates import (
     EarthLocation,
     get_sun,
 )
+from astropy.coordinates.builtin_frames.intermediate_rotation_transforms import (
+    cirs_to_itrs_mat,
+    gcrs_to_cirs_mat,
+)
+from astropy.coordinates.matrix_utilities import matrix_transpose
 from astropy.coordinates import get_body_barycentric_posvel
 
 # BoInOr Imports: Blanket 'import BoInOr is rarely used'
@@ -27,14 +32,32 @@ from boinor.bodies import Earth, Sun
 # MSIS
 import pymsis
 from pymsis import msis
+# PPIGRF (Pure Python International Geomagnetic Reference Field)
+import ppigrf
+from skyfield.api import wgs84, load
 
+# Skyfield (supposedly this makes coord transforms easy)
+import skyfield
 # Other
 import math
 import numpy as np
-from scipy.special import erf
+#from scipy.special import erf
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation
 # Import interpolate function
 from scipy.interpolate import interp1d
+
+import warnings
+from astropy.utils.exceptions import AstropyWarning
+
+warnings.filterwarnings(
+    'ignore',
+    message='Tried to get polar motions for times after IERS data is valid.*',
+    category=AstropyWarning
+)
+
+#warnings.filterwarnings("ignore", category=AstropyWarning)
 
 ### Initialization of Main Constants ###
 ## Standard Gravitational Parameter of Earth
@@ -93,7 +116,7 @@ c_birch = 1300  # J kg^-1 K^-1
 sigma = 5.670374419e-8  # (W m^-2 K^-)4
 
 # To modify solar intake. This essentially sums up any conditions external to the solar panel that could reduce solar input, summarized into one factor representaton.
-SOLAR_CONDITION_FACTOR = 0.40
+SOLAR_CONDITION_FACTOR = 0.75
 
 ## CubeSat properties
 # Area of panels
@@ -108,7 +131,7 @@ A = Lx_panel * Ly_panel  # m^2
 C_D = 2.2  # dimensionless
 
 # Mass of the satellite
-m = 1.5  # kg
+m = 1.33  # kg
 
 # Mass of one panel
 m_panel = rho_birch * A * Lz_panel
@@ -124,7 +147,11 @@ sun_fraction = 0.65  # 65% sunlight per orbit
 # Principal Moments of Inertia
 
 # I changed this to the tensor form because I thought that was the issue
-I_drag = np.array([
+
+
+
+
+I_tensor = np.array([
     [1.581e6, -11927.909, -20665.485],
     [-11927.909, 1.659e6, -9781.097],
     [-20665.485, -9781.097, 1.831e6]
@@ -219,13 +246,12 @@ def getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination):
     # Convert to degrees
     RAAN = np.degrees(RAAN) * u.deg
 
-    print(f"Calculated RAAN: {RAAN:.4f} deg")
+    print(f"Calculated RAAN: {RAAN:.4f}")
     return (RAAN, r_vec, v_vec, n_vec, r_mag, v_mag, n_mag)
 
 
 # For a nearly-circular orbit (Eccentricity is roughly = 0), the Argument of Periapsis is considered to be 0.
 arg_periapsis = 0 * u.deg
-
 
 # True Anomaly
 def getTRUE_ANOMALY(n_vec, r_vec, n_mag, r_mag):
@@ -267,10 +293,12 @@ orbit = Orbit.from_classical(Earth, a, ecc, inc, raan, arg_p, nu, epoch=epoch)
 print(orbit)
 
 # Test time values: over 1 orbit, 5000 points
+days = 1
+
 tofs = TimeDelta(
     np.linspace(
         0 * u.s,
-        90 * u.min,
+        1440 * u.min,
         5000
     )
 )
@@ -279,7 +307,7 @@ LR_val = Earth.R.to(u.km).value
 
 lithobrake_event = LithobrakeEvent(LR_val)
 events = [lithobrake_event]
-#This pauses the simulation if we go below a certain altitude
+# This pauses the simulation if we go below a certain altitude
 
 epochs = orbit.epoch + tofs
 
@@ -430,44 +458,7 @@ rr, vv = orbit.to_ephem(
 
 ### Outputs in Kilometres
 
-
-# Definition of AO Fluence Sim-related functions
-# def rodrigues(k, theta):
-#     k = k / np.linalg.norm(k)
-#
-#     K = np.array([
-#         [0, -k[2], k[1]],
-#         [k[2], 0, -k[0]],
-#         [-k[1], k[0], 0]
-#     ])
-#
-#     I = np.eye(3)
-#
-#     return I + np.sin(theta)*K + (1-np.cos(theta))*(K @ K)
-#
-# def calc_ao_fluence(times, ao_densities, vrels):
-#     t_array = np.array(times)
-#     ao_array = np.array(ao_densities)
-#     v_array = np.array(vrels)
-#
-#     #np.argsort to match elements with timesteps
-#     sort_idx = np.argsort(t_array)
-#     t_array = t_array[sort_idx]
-#     ao_array = ao_array[sort_idx]
-#     v_array = v_array[sort_idx]
-#
-#
-#
-#
-#
-# final_fluence = calc_ao_fluence(
-#     times = history_times,
-#     ao_densities = history_ao_densities,
-#     vrels = history_v_rel
-# )
-
-# AO Progress FROZEN until we get the PDR solar panel count confirmation done
-
+## Since Atomic Oxide can be modeled completely separately, that is what we will be doing.
 
 ### Spin and Thermal Implementation:
 ## Eclipse Function
@@ -555,53 +546,136 @@ def eclipser(t, gcrs_coords, R):
 
 
 ## Calculating Spin
-def euler_eq(t, omega, I_drag, Tau_drag):  # t doesn't matter, btw
+def euler_eq(t, omega, I_tensor, Tau_vec):  # t doesn't matter, btw
 
     omega = np.array(omega)
-    Tau_drag = np.array(Tau_drag)
+    Tau_vec = np.array(Tau_vec)
 
     ## Euler Equation ##
     # I(alpha) + omega *cross* I(omega) = Tau_ext
-    inertia_omega = I_drag @ omega
+    inertia_omega = I_tensor @ omega
     cross_term = np.cross(omega, inertia_omega)
 
-    alpha = np.linalg.solve(I_drag, Tau_drag - cross_term)
+    alpha = np.linalg.solve(I_tensor, Tau_vec - cross_term)
 
     return alpha
 
-## 4th Order Runge-Kutta Method (RK4) Implementation (helps in omega concentration)
-def rk4_omega(t, omega, dt, I_drag, Tau_drag):
-    # I'll be spacing these out for readability
-    k1 = euler_eq(t,
+
+## 4th Order Runge-Kutta Method (RK4) Implementations (helps in omega concentration)
+# Starting with Quaternion math: (multiplying quaternions)
+def quat_multiply(q1, q2):
+    a1, b1, c1, d1 = q1
+    a2, b2, c2, d2 = q2
+
+    a = a1*a2 - b1*b2 - c1*c2 - d1*d2
+    b = a1*b2 + b1*a2 + c1*d2 - d1*c2
+    c = a1*c2 - b1*d2 + c1*a2 + d1*b2
+    d = a1*d2 + b1*c2 - c1*b2 + d1*a2
+
+    multiplied = np.array([a, b, c, d])
+
+    return multiplied
+
+def quat_normalize(q1):
+    normalized = q1 / np.linalg.norm(q1)
+    return normalized
+
+# Spin Derivatives
+def spin_eq(t, spin_current_state, I_tensor, Tau_vec):
+
+    quat = spin_current_state[0:4]
+    omega = spin_current_state[4:7]
+
+    omega_quat = np.array([0, omega[0], omega[1], omega[2]])
+
+    # In order to advance a quaternion, we multiply the initial quaternion
+    dq_dt = 0.5 * quat_multiply(
+        quat,
+        omega_quat
+    )
+
+    domega_dt = euler_eq(t,
                   omega,
-                  I_drag,
-                  Tau_drag
-                  )
-    k2 = euler_eq(t + dt / 2,
-                  omega + (dt * k1 / 2),
-                  I_drag,
-                  Tau_drag
-                  )
-    k3 = euler_eq(t + dt / 2,
-                  omega + (dt * k2 / 2),
-                  I_drag,
-                  Tau_drag
-                  )
-    k4 = euler_eq(t + dt,
-                  omega + (dt * k3),
-                  I_drag,
-                  Tau_drag
+                  I_tensor,
+                  Tau_vec
                   )
 
-    change_omega = (dt / 6) * (k1 + 2*k2 + 2*k3 + k4)
+    dState_dt = np.concatenate((dq_dt, domega_dt))
 
-    omega_new = omega + change_omega
-
-    return omega_new
+    return dState_dt
 
 
-def spin_sun_earth(t, theta, gcrs_coords):
 
+def rk4_spin(t, spin_current_state, dt, I_tensor, Tau_vec):
+    # I'll be spacing these out for readability
+    k1 = spin_eq(t,
+                  spin_current_state,
+                  I_tensor,
+                  Tau_vec
+                  )
+    k2 = spin_eq(t + dt / 2,
+                  spin_current_state + (dt * k1 / 2),
+                  I_tensor,
+                  Tau_vec
+                  )
+    k3 = spin_eq(t + dt / 2,
+                  spin_current_state + (dt * k2 / 2),
+                  I_tensor,
+                  Tau_vec
+                  )
+    k4 = spin_eq(t + dt,
+                  spin_current_state + (dt * k3),
+                  I_tensor,
+                  Tau_vec
+                  )
+
+    dspin_current_state = (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+    next_state = spin_current_state + dspin_current_state
+
+    # Normalizing the quaternion so that its magnitude is always 1
+    next_state[0:4] = quat_normalize(next_state[0:4])
+
+    return next_state
+
+# Building our rotation matrix using a quaternion (like R from theta)
+def quat_to_R(quat):
+
+    # Breaking down the respective components
+    w, x, y, z = quat
+
+    # Precalculating some terms for efficiency
+    x2, y2, z2, = x**2, y**2, z**2
+    wx, wy, wz = w * x, w * y, w * z
+    xy, yz, xz = x * y, y * z, x * z
+
+    # Rotation Matrix
+    R = np.array([
+        [1 - 2 * (y2 + z2), 2 * (xy - wz), 2 * (xz + wy)],
+        [2 * (xy + wz), 1 - 2 * (x2 + z2), 2 * (yz - wx)],
+        [2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (x2 + y2)]
+    ])
+
+    ### OUR CODE CONVENTION USES R = BODY -> INERTIAL
+    ### THEREFORE, R^T = INERTIAL -> BODY
+
+    return R
+
+# This is to make our lives easier for the initial conditions. Calculating a quaternion that's magnitude is 1 is a pain.
+# So we're creating a conversion for theta -> quaternions
+
+"""
+def xyz_to_quat(theta):
+    theta_x, theta_y, theta_z = theta  # angle [rad]
+
+    ####### I'll be honest, this is kinda difficult to grasp my head around, so this is something I'll work on later.
+    ####### For now, 
+
+    return quat
+"""
+
+
+def spin_sun_earth(t, quat, gcrs_coords):
     ### Implementation of Spin ###
     # Face normals (orientation of each face)
     face_normals = np.array([
@@ -613,29 +687,7 @@ def spin_sun_earth(t, theta, gcrs_coords):
         [0, 0, -1],  # -Z face (5)
     ])
 
-    ## Spin kinematics
-    theta_x, theta_y, theta_z = theta  # angle [rad]
-
-    ## 3D rotation matrix for tumbling spin
-    Rx = np.array([
-        [1, 0, 0],
-        [0, np.cos(theta_x), -np.sin(theta_x)],
-        [0, np.sin(theta_x), np.cos(theta_x)]
-    ])
-
-    Ry = np.array([
-        [np.cos(theta_y), 0, np.sin(theta_y)],
-        [0, 1, 0],
-        [-np.sin(theta_y), 0, np.cos(theta_y)]
-    ])
-
-    Rz = np.array([
-        [np.cos(theta_z), -np.sin(theta_z), 0],
-        [np.sin(theta_z), np.cos(theta_z), 0],
-        [0, 0, 1]
-    ])
-
-    R = Rx @ Ry @ Rz
+    R = quat_to_R(quat)
 
     ### Sunlight/eclipse state
     sun_vector, earth_vector, sun_state = eclipser(t, gcrs_coords, R)
@@ -655,10 +707,170 @@ def spin_sun_earth(t, theta, gcrs_coords):
 
     return Earth_cosine, Sun_cosine, sun_state, R
 
-### Functions
-def derivatives(t, T_faces, T_internal, theta, full_current_state, Earth_cosine, Sun_cosine, sun_state):
-    gcrs_coords = full_current_state[0:3]
+def unit_mag_vector(t0, state, R):
+    # Convert Cowell's elapsed time into an actual Astropy time
+    current_time = epoch + t0 * u.s
 
+    # Extract position from six-element state vector
+    x, y, z = state[0:3]
+    gcrs_coords = np.array([x, y, z])
+    r_mag_now = np.linalg.norm(gcrs_coords)
+
+    # In order to convert to ITRS, we need to convert GCRS to astropy terms with units and time attached
+    gcrs_astropy = GCRS(
+        CartesianRepresentation(
+            x * u.km,
+            y * u.km,
+            z * u.km,
+        ),
+        obstime=current_time
+    )
+
+    # Convert GCRS to ITRS
+    itrs_astropy = gcrs_astropy.transform_to(
+        ITRS(obstime=current_time)
+    )
+
+    ## Convert to Earth coords (latitude, longitude, altitude)
+    location_now = EarthLocation(
+        x=itrs_astropy.x,
+        y=itrs_astropy.y,
+        z=itrs_astropy.z
+    )
+
+    lat = location_now.lat  # This is probably already in degrees
+    lon = location_now.lon
+    altitude = location_now.height
+
+    # colatitude
+    colatitude_now = 90 * u.degree - lat
+
+    # Returns radial, south, east -- so radial, colatitude, and longitudinal comps
+    B_r, B_theta, B_phi = ppigrf.igrf_gc(
+        r=r_mag_now, # Already in km
+        theta=colatitude_now.to_value(u.deg),
+        phi=lon.to_value(u.deg),
+        date=current_time.datetime
+    )
+
+    # Converting from nanoteslas to teslas
+    B_r *= 1e-9
+    B_theta *= 1e-9
+    B_phi *= 1e-9
+
+    # Numpy expects radians
+    colat_rad = math.radians(colatitude_now.value)
+    lon_rad = math.radians(lon.value)
+
+    B_spherical = np.array([B_r, B_theta, B_phi]) # In Teslas
+
+    R_spherical_to_ECEF = np.array([
+        [np.sin(colat_rad) * np.cos(lon_rad), np.cos(colat_rad) * np.cos(lon_rad), -1 * np.sin(lon_rad)],
+        [np.sin(colat_rad) * np.sin(lon_rad), np.cos(colat_rad) * np.sin(lon_rad), np.cos(lon_rad)],
+        [np.cos(colat_rad), -1 * np.sin(colat_rad), 0]
+    ])
+
+    B_ecef = R_spherical_to_ECEF @ B_spherical
+    B_ecef = B_ecef.flatten()
+
+
+    # 1. Get the constituent rotation matrices for the given time
+    # cirs_to_itrs_mat maps CIRS -> ITRS, so its transpose maps ITRS -> CIRS
+    mat_itrs_to_cirs = matrix_transpose(cirs_to_itrs_mat(current_time))
+
+    # gcrs_to_cirs_mat maps GCRS -> CIRS, so its transpose maps CIRS -> GCRS
+    mat_cirs_to_gcrs = matrix_transpose(gcrs_to_cirs_mat(current_time))
+
+    # 2. Chain them together to get the full ITRS -> GCRS rotation matrix
+    matrix_itrs_to_gcrs = mat_cirs_to_gcrs @ mat_itrs_to_cirs
+
+    # 3. Now matrix multiplication
+    B_gcrs = matrix_itrs_to_gcrs @ B_ecef
+
+    B_body = R.T @ B_gcrs
+
+    u_mag_vector = B_body / np.linalg.norm(B_body)
+
+    return np.array(B_body), u_mag_vector
+
+"""
+def magnetic_torque(t, state, R):
+    # Running unit_mag_vector to get our magnetic field values:
+    B_body, u_mag_vector = unit_mag_vector(t, state, R)
+
+    ## Magnetic Dipole Moment of magnet (From Bill of Materials)
+    m_mag = 0.2  # Amps-m^2
+
+    # +Z face direction vector (no solar panel on this face) (face 4)
+    z_face = np.array([0, 0, 1])
+
+    m_vec_body = m_mag * z_face
+
+    # Magnetic torque = m *cross* B
+    Tau_magnet = np.cross(m_vec_body, B_body)
+
+    # Alignment angle
+    alignment_angle = math.degrees(math.acos(np.clip(
+        np.dot(m_vec_body, B_body) / (np.linalg.norm(m_vec_body) * np.linalg.norm(B_body))))
+    )
+
+
+    # Debugging
+    '''
+    print("B =", B_body)
+    print("B magnitude =", np.linalg.norm(B_body), "and unit vector = ", u_mag_vector)
+    '''
+
+    return Tau_magnet, alignment_angle, u_mag_vector
+"""
+
+# A REALLY rough approximation of damping, where say tau_damp = -k * omega
+def damper_torque(spin_current_state):
+    # spin_current_state typically contains [omega_x, omega_y, omega_z]
+    # (or combined with quaternions depending on your state vector layout)
+    omega = spin_current_state[4:7]  # Assuming angular velocity is the first 3 elements
+
+    # Lowball scalar damping coefficient
+    k_damp = 1e-4
+
+    # Simple proportional damping torque opposing the rotation
+    Tau_damp = -k_damp * omega
+
+    return Tau_damp
+
+def magnetic_torque(t, state, R):
+    # Running unit_mag_vector to get our magnetic field values:
+    B_body, u_mag_vector = unit_mag_vector(t, state, R)
+
+    ## Magnetic Dipole Moment of magnet (From Bill of Materials)
+    m_mag = 0.2  # Amps-m^2
+
+    # +Z face direction vector (no solar panel on this face) (face 4)
+    z_face = np.array([0, 0, 1])
+
+    m_vec_body = m_mag * z_face
+
+    # Magnetic torque = m *cross* B
+    Tau_magnet = np.cross(m_vec_body, B_body)
+
+    # Alignment angle
+    cos_angle = np.dot(m_vec_body, B_body) / (
+            np.linalg.norm(m_vec_body) * np.linalg.norm(B_body)
+    )
+    alignment_angle = math.degrees(math.acos(np.clip(cos_angle, -1.0, 1.0)))
+
+
+    # Debugging
+    '''
+    print("B =", B_body)
+    print("B magnitude =", np.linalg.norm(B_body), "and unit vector = ", u_mag_vector)
+    '''
+
+    return Tau_magnet, alignment_angle, u_mag_vector
+
+### Functions
+def derivatives(t, T_faces, T_internal, full_current_state, Earth_cosine, Sun_cosine, sun_state):
+    gcrs_coords = full_current_state[0:3]
 
     # Arrays for the 6 faces
     dT_faces = np.zeros(6)
@@ -741,13 +953,13 @@ def derivatives(t, T_faces, T_internal, theta, full_current_state, Earth_cosine,
 def propagation(tofs, rr, vv):
     ## Setup variables
     # Initial Conditions
-    # Theta (Initial Angle)
-    theta_0 = np.array([0.01, 0.01, 0.01])
-    theta = theta_0
+    # Quaternion (Initial angle)
+    quat_0 = np.array([1, 0, 0, 0])
+    quat = quat_0.copy()
 
     # Omega (Initial angular velocity)
-    omega_0 = np.array([0.3, 0.2, 0.5])
-    omega = omega_0
+    omega_0 = np.array([0.05, 0.1, 0.1])
+    omega = omega_0.copy()
 
     # Initial Temperature of External Chassis faces (K)
     T_faces = np.ones(6) * 280  # Considering 280 K for now. Probably gonna change it
@@ -758,33 +970,19 @@ def propagation(tofs, rr, vv):
     # Lists
     T_ext_list = []
     T_int_list = []
-    theta_list = []
+    quat_list = []
     omega_list = []
     energy_history_list = []
     cumulative_energy_joules = np.zeros(6)
     instant_power_list = []
+    dominant_dir_list = []
 
-    # Convert lists to NumPy arrays so argsort works properly
-    ### If we don't need thes (I don't see if we do), we could just remove this
-    """
-    t_arr = np.array(history_times)
-    state_arr = np.array(state_list)
-    drag_arr = np.array(drag_accel_list)
-
-    # Sorting EVERYTHING by time
-    sort_idx = np.argsort(t_arr)
-    history_times = t_arr[sort_idx]
-    state_list = state_arr[sort_idx]
-    drag_accel_list = drag_arr[sort_idx]
-    """
-
-    ## Using consistent timesteps
-    ### Pratyush, if you think argsorting t_grid is a good choice, feel free to do so.
     t_grid = tofs.to_value(u.s)
-
 
     ## Initial R (1)
     R = np.eye(3)
+    # Converts Body -> Inertial
+
     # Propagation Loop
     for i in range(1, len(t_grid)):
         ## Time Setup
@@ -795,8 +993,12 @@ def propagation(tofs, rr, vv):
         r = rr[i].to(u.km).value
         v = vv[i].to(u.km / u.s).value
 
-        # Current state (needed for earth vector)
-        full_current_state = np.concatenate((r , v))
+        # Current state (translational)
+        full_current_state = np.concatenate((r, v))
+
+        # Current state (rotational)
+        spin_current_state = np.concatenate((quat, omega))
+
         gcrs_coords = full_current_state[0:3]
 
         # Timestep (s)
@@ -820,12 +1022,12 @@ def propagation(tofs, rr, vv):
         v_rel_prop = v - v_atm_prop
 
         a_drag_vec = (
-            -0.5
-            * C_D
-            * (A * 1e-6 / m) # We multiply by 1e-06 to output in km/s/s (for readability purposes, because we're just going to convert to SI units in the next step)
-            * rho_prop
-            * np.linalg.norm(v_rel_prop)
-            * v_rel_prop
+                -0.5
+                * C_D
+                * (A * 1e-6 / m)  # We multiply by 1e-06 to output in km/s/s (for readability purposes, because we're just going to convert to SI units in the next step)
+                * rho_prop
+                * np.linalg.norm(v_rel_prop)
+                * v_rel_prop
         )
 
         F_drag = m * a_drag_vec * 1000  # To change from km/s^2 to m/s^2
@@ -835,40 +1037,81 @@ def propagation(tofs, rr, vv):
         r_cp_cm = np.array([0.03, 0, 0])
         Tau_drag = np.cross(r_cp_cm, F_body)
 
+        # Magnetic Torque (barbeque roll)
+        """
+        Tau_magnet, alignment_angle, u_mag_vector= magnetic_torque(t, full_current_state, R)
+
+        Tau_damp = damper_torque(spin_current_state, u_mag_vector, R)
+        """
+        Tau_magnet, alignment_angle, u_mag_vector = magnetic_torque(t, full_current_state, R)
+
+        Tau_damp = damper_torque(spin_current_state)
+
+        # Tau_vec = (Tau_drag)
+        Tau_vec = Tau_drag + Tau_magnet + Tau_damp
+
+        '''
+        # Debugging
+        print("Tau_drag =", Tau_drag)
+        print("Tau_magnet =", Tau_magnet)
+        print("I_tensor (det) =", np.linalg.det(I_tensor))
+        print("I_tensor=", I_tensor)
+        '''
+
         ## Spin Integration
-        # Instead of using euler_eq directly, we'll be using an RK4 Method:
-        omega = rk4_omega(t, omega, dt, I_drag, Tau_drag)
+        # Instead of using euler_eq directly, we'll be using an RK4 Method for the rotational integration:
+        spin_current_state = rk4_spin(t, spin_current_state, dt, I_tensor, Tau_vec)
+
+        # Splitting the spin state into quaternion and omega
+        quat = spin_current_state[0:4]
+        omega = spin_current_state[4:7]
+
+
+        ## Debugging (Can remove if produces no output)
+        if i % 500 == 0:
+            print("Drag tau:", np.linalg.norm(Tau_drag), #"Magnet tau:", np.linalg.norm(Tau_magnet),
+             "Tau:", np.linalg.norm(Tau_vec))
+            print("Drag Tau =", Tau_drag, "Tau Vector =", Tau_vec)
 
         ## Debugging (Can remove if produces no output)
         if not np.all(np.isfinite(omega)):
             print("Bad Omega lol")
-            print(t)
-            print(dt)
-            print(omega)
+            print('t=',t)
+            print('dt=',dt)
+            print('omega=',omega)
             break
 
         ## Debugging (Can comment out or remove if desired)
         if i % 500 == 0:
             print(
                 f"t={t:.0f}",
-                f"|omega|={np.linalg.norm(omega):.4f}"
+                f"|omega|={np.linalg.norm(omega):.4f}; omega={omega}"
             )
 
-        # Accumulated Angle
-        theta += omega * dt
+        # Debugging (Can remove if desired)
+        if i % 500 == 0:
+            print("Quaternion:", quat, "mag =", np.linalg.norm(quat))
 
         ## Debugging
-        if not np.all(np.isfinite(theta)):
-            print("Bad Theta lol")
-            print(t)
-            print(theta)
+        if not np.all(np.isfinite(quat)):
+            print("Bad Quaternion lol")
+            print('t=',t)
+            print('quat=', quat)
             break
 
+        """
+        # Printing Alignment angle:
+        if i % 500 == 0:
+            print(
+                f"Alignment Angle at t = {t:.0f} is {alignment_angle:.2f} degrees"
+            )
+        """
+
         # spin values required for both derivatives() and calculating drag_force in the body frame
-        Earth_cosine, Sun_cosine, sun_state, R = spin_sun_earth(t, theta, gcrs_coords)
+        Earth_cosine, Sun_cosine, sun_state, R = spin_sun_earth(t, quat, gcrs_coords)
 
         ## Temperature Integration
-        dT_faces, dTi_dt, P_faces = derivatives(t, T_faces, T_internal, theta, full_current_state, Earth_cosine, Sun_cosine, sun_state)
+        dT_faces, dTi_dt, P_faces = derivatives(t, T_faces, T_internal, full_current_state, Earth_cosine, Sun_cosine, sun_state)
 
         T_faces += dT_faces * dt
         T_internal += dTi_dt * dt
@@ -881,8 +1124,8 @@ def propagation(tofs, rr, vv):
 
         # Power Integration
         # Power (Watts = Joules/sec) * dt (seconds) = Energy generated this step (Joules)
-        #Log instant power generation
-        instant_power_list.append(P_faces)
+        # Log instant power generation
+        instant_power_list.append(P_faces.copy())
         energy_step_joules = P_faces * dt
 
         # Add it to our running total for each face
@@ -892,21 +1135,36 @@ def propagation(tofs, rr, vv):
         # (1 Watt-hour = 3,600 Joules)
         cumulative_energy_wh = cumulative_energy_joules / 3600.0
 
+        #Dominant rotation direction at any given time -- time series list
+        om = omega.copy()
+        wx, wy, wz = om
+
+        #Key: Dominant direction 1 is wx is dominant, 2 for wy, and 3 for wz
+
+        if wx > wy and wx > wz:
+            dominant_direction = 1
+        elif wy>wx and wy>wz:
+            dominant_direction = 2
+        elif wz>wy and wy>wx:
+            dominant_direction = 3
+
+
         ## Update Lists
         ''' So apparently there's a bug ("") in numpy, where if you were to append a numpy list, it might change the previous quantity
         This is because numpy lists are mutable, and refer to the id of the object, not the value. Just to be on the safe side, we'll be
-        using .copy(). It doesn't change anything.'''
+        using .copy(). This doesn't change any values; it's just a precaution.'''
         T_ext_list.append(T_faces.copy())
         T_int_list.append(float(T_internal))
-        theta_list.append(theta.copy())
+        quat_list.append(quat.copy())
         omega_list.append(omega.copy())
         energy_history_list.append(cumulative_energy_wh.copy())
+        dominant_dir_list.append(dominant_direction)
 
-    return np.array(T_ext_list), np.array(T_int_list), omega_list, np.array(energy_history_list), np.array(instant_power_list)
+    return np.array(T_ext_list), np.array(T_int_list), omega_list, np.array(energy_history_list), np.array(instant_power_list), np.array(dominant_dir_list), np.array(quat_list)
 
 
 ### Running the Thermal Model (AFTER integrating f function)
-T_ext, T_int, omega, energy_history_list, instant_pwr_history = propagation(tofs, rr, vv)
+T_ext, T_int, omega, energy_history_list, instant_pwr_history, dominant_direction_history, quat_history = propagation(tofs, rr, vv)
 
 ### Maximum and Minimum Temperatures
 # External panels
@@ -1034,7 +1292,11 @@ def thermal_expansion(Lx_panel, Ly_panel, Lz_panel, Te_max, Te_min):
 
 
 ## Running the Thermal Expansion loop
-dLx_list_hot, dLy_list_hot, dLz_list_hot, dLx_list_cold, dLy_list_cold, dLz_list_cold = thermal_expansion(Lx_panel,Ly_panel, Lz_panel, Te_max, Te_min)
+dLx_list_hot, dLy_list_hot, dLz_list_hot, dLx_list_cold, dLy_list_cold, dLz_list_cold = thermal_expansion(Lx_panel,
+                                                                                                          Ly_panel,
+                                                                                                          Lz_panel,
+                                                                                                          Te_max,
+                                                                                                          Te_min)
 
 # 3D Render
 plotter = OrbitPlotter(backend=Plotly3D())
@@ -1046,6 +1308,15 @@ plt.ylabel("h(t)")
 plt.xlabel("t, days")
 plt.plot(tofs[: len(rr)].value, np.linalg.norm(rr, axis=1) - Earth.R)
 plt.show()
+
+# Printing Maximum and minimum values
+altitude = np.linalg.norm(
+    rr.to(u.km).value,
+    axis=1
+) - Earth.R.to(u.km).value
+
+print("Max Altitude:", np.max(altitude), "And Min Altitude:", np.min(altitude))
+
 # Power generation per face plot
 face_names = ["+X Face", "-X Face", "+Y Face", "-Y Face", "+Z Face", "-Z Face"]
 fig, axes = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
@@ -1079,6 +1350,13 @@ print("Power generated by", face_names[3], ":", f"{energy_history_list[-1, 3]:.4
 print("Power generated by", face_names[4], ":", f"{energy_history_list[-1, 4]:.4f} Wh")
 print("Power generated by", face_names[5], ":", f"{energy_history_list[-1, 5]:.4f} Wh")
 
+print("Power generated by", face_names[0], ":", f"{energy_history_list[-1, 0]:.4f} Wh")
+print("Power generated by", face_names[1], ":", f"{energy_history_list[-1, 1]:.4f} Wh")
+print("Power generated by", face_names[2], ":", f"{energy_history_list[-1, 2]:.4f} Wh")
+print("Power generated by", face_names[3], ":", f"{energy_history_list[-1, 3]:.4f} Wh")
+print("Power generated by", face_names[4], ":", f"{energy_history_list[-1, 4]:.4f} Wh")
+print("Power generated by", face_names[5], ":", f"{energy_history_list[-1, 5]:.4f} Wh")
+
 # Time axis (skipping the first history time since the loop starts at index 1)
 time_grid = tofs.to_value(u.s)
 time_axis = time_grid[1:]
@@ -1097,3 +1375,70 @@ axes2[4].set_xlabel("Time (s)")
 axes2[5].set_xlabel("Time (s)")
 plt.tight_layout()
 plt.show()
+
+# --- 3. THIRD PLOT: Dominant Direction. Remember the key from earlier, same applies.
+time_grid = tofs.to_value(u.s)
+time_axis = time_grid[1:]
+
+fig3, axes3 = plt.subplots(figsize=(12, 10))
+axes3.plot(time_axis, dominant_direction_history, color='tab:blue', linewidth=1.5)
+axes3.set_title("Dominant Direction. 1=wx, 2=wy, 3=wz")
+axes3.set_xlabel("Time (s)")
+axes3.set_ylabel("Numerical Indicator for Dominant Direction")
+axes3.grid(True)
+axes3.legend()
+plt.show()
+
+#
+# # -- 4. Fourth item: 3d vector visualization thingy
+# time_grid = tofs.to_value(u.s)
+# time_axis = time_grid[1:]
+#
+# fig4, axes4 = plt.subplots(subplot_kw=dict(projection="3d"))
+# axes4: Axes3D = axes4
+#
+# axes4.set_xlim(-2, 2)
+# axes4.set_ylim(-2, 2)
+# axes4.set_zlim(-2, 2)
+#
+# X_axis = [1,0,0]
+# Y_axis = [0,1,0]
+# Z_axis = [0,0,1]
+#
+# U_X_in = [1,0,0]
+# U_Y_in = [0,1,0]
+# U_Z_in = [0,0,1]
+#
+# quiver = axes4.quiver(X_axis, Y_axis, Z_axis, U_X_in, U_Y_in, U_Z_in)
+#
+# def get_arrows(r_anim):
+#     X_ax =
+#     Y_ax =
+#     Z_ax =
+#
+#
+#     return X_ax, Y_ax, Z_ax
+#
+#
+# def update(i):
+#     quiver.remove()
+#     r_anim = R.from_quat(quat_history[i])
+#
+#
+#
+#
+# axes4.set_xlabel("x")
+# axes4.set_ylabel("y")
+# axes4.set_zlabel("z")
+#
+# """
+# Construction Reference for how many frames we need to keep everything synced
+# time_grid = tofs.to_value(u.s)
+# time_axis = time_grid[1:]
+#
+# The propogation loop didn't run for the 'initial' state, so quat_history should have one less item that tofs. Hopefully
+# this allows for time_axis and quat_history to be called together with the same 'i' indicator, since FuncAnimation
+# doesn't start at frame 0 either, I hope."""
+#
+# anim = FuncAnimation(fig4, update, frames=time_axis, interval=50, repeat=False, blit=True)
+#
