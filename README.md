@@ -2,6 +2,8 @@
 
 This is a public copy of the full mission simulation that Ekansh Sharma and I, Pratyush Majumdar, have been working on together starting from August 21st. This model is to simulate a novel wooden CubeSat, WolfSat-2, and includes various different models. We use astropy and BoInOr libraries for our code.
 
+Commits to this PUBLIC version may be sporadic cuz we're mainly working on the privatized version for the WS2 organization. This one mainly exists for easy outside sharing.
+
 1. Altitude Modelling
 
 We gathered data using pymsis, and MSIS data wrapper, to accurately retrieve atmospheric entities for atmospheric drag calculations. We use Cowell Propagation for the Altitude Modelling portion.
