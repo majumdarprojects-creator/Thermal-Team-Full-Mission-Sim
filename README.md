@@ -37,7 +37,7 @@ Sun_cosine = incident angle between sun’s rays and panel surface
 
 Sun_state = a modifier that is either 0 or 1 at any given moment. It is 0 when the satellite is in eclipse, so that we do not count time spent in shadow as actually generating power
 
-SOLAR_ CONDITION_FACTOR = An aggregate for conditions external to satellite function that may further reduce solar input. Set to 0.4 to simulate particularly harsh external conditions
+SOLAR_ CONDITION_FACTOR = An aggregate for conditions external to satellite function that may further reduce solar input. Set to 0.75 to simulate particularly harsh external conditions
 
 We will implement tumbling along 3 axes for our incidence angle calculations
 After the simulation, we would sum up the powers of any two non-touching sides, excluding z faces, and that is the total power generated per orbit in Wh
