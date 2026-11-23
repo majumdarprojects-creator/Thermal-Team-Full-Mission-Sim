@@ -41,23 +41,15 @@ import skyfield
 # Other
 import math
 import numpy as np
-#from scipy.special import erf
+from scipy.special import erf
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.animation import FuncAnimation
 # Import interpolate function
 from scipy.interpolate import interp1d
 
+# Removing these warnings because they print every timestep
 import warnings
 from astropy.utils.exceptions import AstropyWarning
-
-warnings.filterwarnings(
-    'ignore',
-    message='Tried to get polar motions for times after IERS data is valid.*',
-    category=AstropyWarning
-)
-
-#warnings.filterwarnings("ignore", category=AstropyWarning)
+warnings.filterwarnings("ignore", category=AstropyWarning)
 
 ### Initialization of Main Constants ###
 ## Standard Gravitational Parameter of Earth
@@ -81,15 +73,28 @@ F107A_ASSUMED = 70.0
 AP_ASSUMED = 15.0
 
 ## Epoch Launch Time
-epoch = Time("2027-12-01 00:00:00", scale="utc")
+epoch = Time("2028-02-01 00:00:00", scale="utc")
 
-# Injection Position
-lat_Injection = 42.1 * u.deg  # Latitude of Hokkaido
+## Injection Positions:
+
+# Latitude of Hokkaido
+lat_Injection = 42.1000 * u.deg
 # Inclination gives the max and min latitude values: N 42.1 to S 42.1.
-# While Hokkaido is at N 43.1, we're using 42.1 because that is the inclination given by Interstellar Technologies
-# Longtitude of Hokkaido
-long_Injection = 142.32 * u.deg
-h_0 = 230.0 * u.km
+"""
+VERY IMPORTANT:
+Interstellar Technologies gave us an inclination of 42.1 deg; but the Hokkaido launch platform is at 42.5 deg
+Plugging in lat_Injection = 42.5000 * u.deg gives an error (negative in square root) which is just the math's way of saying
+"That's literally not possible", so I'll stick with lat_Injection = 42.1 * u.deg for now
+"""
+
+# Longitude of Hokkaido
+long_Injection = 143.4418 * u.deg
+
+# 180 km x 300 km Orbit
+h_p = 180 * u.km # Perigee
+h_a = 300 * u.km # Apogee
+
+h_0 =  0.5 * (h_p + h_a) # Average initial height
 
 ## Orbital Parameters.
 # Semi-major Axis
@@ -98,9 +103,6 @@ a = R_E + h_0
 
 # Inclination
 inclination = 42.1 * u.deg
-
-# Eccentricity
-e = 0 * u.one  # Our orbit is approximately circular
 
 ### Constants ###
 # Solar Absorptivity / IR Emissivity
@@ -120,7 +122,9 @@ SOLAR_CONDITION_FACTOR = 0.75
 
 ## CubeSat properties
 # Area of panels
+# 10 cm * 10 cm panels
 Lx_panel = Ly_panel = 0.1  # m
+
 # Thickness
 Lz_panel = 0.006  # m
 
@@ -140,17 +144,8 @@ m_panel = rho_birch * A * Lz_panel
 cell_count = 1
 n_eff = 0.20  # Efficiency of solar panel
 
-# Sunlit Fraction
-sun_fraction = 0.65  # 65% sunlight per orbit
-
 ## Other Important Spin-related Constants
-# Principal Moments of Inertia
-
-# I changed this to the tensor form because I thought that was the issue
-
-
-
-
+# Principal Moments of Inertia (gcm^2)
 I_tensor = np.array([
     [1.581e6, -11927.909, -20665.485],
     [-11927.909, 1.659e6, -9781.097],
@@ -163,13 +158,7 @@ I_tensor = np.array([
 
 # We Consider the Initial Angular Acceleration to be 0 since the only external forces in motion after we launch is atmospheric drag
 
-
-"""
-Here are some values that we might want to change, but it's not required to do so.
-If we were to change them, sure, we'd get slightly more accurate results, but if it's a hassle to do so, we might not, because the accuracy change is almost minimal.
-"""
-# Orbital Period (s)
-P_orbit = 90 * 60
+## Thermal Initialization
 # Solar Constant
 S_sun = 1361  # W m^-2
 # Albedo Flux
@@ -177,9 +166,22 @@ albedo = 150  # W m^-2
 # Earth IR Flux
 IR_earth = 237  # W m^-2
 
+## Test time values:
+# Orbital Period (min)
+P_orbit = 90 * u.min
+# Simulation Length (can also use P_orbit for simulation of 1 orbit)
+days = 3 * u.day
+
+
+
 
 # RAAN
-def getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination):
+"""
+One VERY important assumption we are taking into consideration is that this proof is built upon the orbit being circular.
+Since our eccentricty is roughly 0.0091, we are simplifying RAAN such so.
+This proof uses circular motion mechanics, and is about as close as I can get without losing my sanity to a proper RAAN).
+"""
+def getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination, a):
     ## Finding Position Vector
     # Location relative to Earth's center (ECEF) - WGS84 ellipsoid model (astropy does this automatically)
     pointing_location = EarthLocation.from_geodetic(
@@ -194,33 +196,39 @@ def getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination):
     # GCRS Position Vector:
     x_gcrs, y_gcrs, z_gcrs = gcrs_vector.cartesian.x.to(u.km).value, gcrs_vector.cartesian.y.to(
         u.km).value, gcrs_vector.cartesian.z.to(u.km).value
-    r_mag = np.sqrt(x_gcrs ** 2 + y_gcrs ** 2 + z_gcrs ** 2)
 
+    # Position Vector
     r_vec = np.array([x_gcrs, y_gcrs, z_gcrs])
+    r_mag = np.linalg.norm(r_vec)
+    # r_magnitude = distance from the center = semi-major axis
 
     ## Finding Velocity Vector
     # Scalar speed (Magnitude of Velocity vector)
-    v_mag = np.sqrt(mu / r_mag)  # r_magnitude = distance from the center = semi-major axis
+    a = a.to_value(u.km)
+    v_mag = np.sqrt(
+        mu * (
+            (2 / r_mag) - (1 / a)
+        )
+    )
 
     # Converting inclination to radians (Python only uses radians for trigonometric functions)
     inc_rad = np.radians(inclination.value)
 
     # Calculate Velocity Components
-    # Derivation for these equations is in the Wolfsat-2 Thermal Subsytem Folder
+    # Derivation for these equations (for a circular orbit) is in the Wolfsat-2 Thermal Subsytem Folder
     v_z = v_mag * np.sqrt((x_gcrs ** 2 + y_gcrs ** 2) / (r_mag ** 2) - np.cos(inc_rad) ** 2)
 
-    h_z = r_mag * v_mag * np.cos(inc_rad)  # Setting the specific angular momentum's z-component to make the math easier
+    h_z = r_mag * v_mag * np.cos(inc_rad)  # Precalculating the specific angular momentum's z-component to make the math easier
 
     v_x = (-y_gcrs * h_z - x_gcrs * z_gcrs * v_z) / (x_gcrs ** 2 + y_gcrs ** 2)
     v_y = (x_gcrs * h_z - y_gcrs * z_gcrs * v_z) / (x_gcrs ** 2 + y_gcrs ** 2)
 
+    # Velocity Vector (with recalculated v_mag)
     v_vec = np.array([v_x, v_y, v_z])
+    v_mag = np.linalg.norm(v_vec)
 
     ## Calculate RAAN
-    # r_vector
-    # v_vector
-
-    # Angular Momentum Vector
+    # Specific Angular Momentum Vector
     h_vec = np.cross(r_vec, v_vec)
 
     # Node Vector (Line of Nodes)
@@ -229,15 +237,17 @@ def getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination):
     n_vec = np.cross(k_vec, h_vec)
     n_x = n_vec[0]
     n_y = n_vec[1]
-    n_z = n_vec[
-        2]  # This is always 0, but I like when my math is complete, so I will be including it into the magnitude equation :)
+    n_z = n_vec[2]  # This is always 0, but I'm a perfectionist.
 
-    n_mag = np.sqrt(n_x ** 2 + n_y ** 2 + n_z ** 2)
+    n_mag = np.linalg.norm(n_vec)
 
     # RAAN
     RAAN_raw = np.arccos(n_x / n_mag)
 
-    # Logic check (arccos only outputs values for 0 to pi radians)
+    ## Logic check (arccos only outputs values for 0 to pi radians)
+    # Measures angle between node vector and +x-axis
+    # n_vec (n_mag) lies in the equatorial plane, [n_x, n_y, 0] so if n_y is +ve, it's in the Ist and IInd Quadrant and so on
+
     if n_y < 0:
         RAAN = 2 * np.pi - RAAN_raw
     else:
@@ -247,39 +257,97 @@ def getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination):
     RAAN = np.degrees(RAAN) * u.deg
 
     print(f"Calculated RAAN: {RAAN:.4f}")
-    return (RAAN, r_vec, v_vec, n_vec, r_mag, v_mag, n_mag)
+    return RAAN, r_vec, v_vec, n_vec, r_mag, v_mag, n_mag, h_vec
 
+# Eccentricity (Orbit is 180 x 300; so ecc is not 0)
+def getECCEN(R_E, h_p, h_a, r_vec, v_vec, r_mag, v_mag, h_vec):
 
-# For a nearly-circular orbit (Eccentricity is roughly = 0), the Argument of Periapsis is considered to be 0.
-arg_periapsis = 0 * u.deg
+    r_p = (R_E.to_value(u.km) + h_p.to_value(u.km))
+    r_a = (R_E.to_value(u.km) + h_a.to_value(u.km))
+    ecc = np.abs((r_p - r_a) / (r_p + r_a))
+
+    # Eccentricity Vector
+    ecc_vec = (
+        np.cross(v_vec, h_vec) / mu - r_vec / r_mag
+    )
+
+    # ecc = np.linalg.norm(ecc_vec), so we don't have to worry about that
+    print(f"Calculated Eccentricity: {ecc:.6f}")
+    return ecc, ecc_vec
+
+# Argument of Periapsis (point of closest approach)
+def getARGPER(ecc_vec, ecc, n_vec, n_mag):
+    # Argument of Periapsis, Raw
+
+    arg_per_raw = np.arccos(
+        np.clip(
+            np.dot(n_vec, ecc_vec) / (n_mag * ecc),
+            -1, 1
+        )
+    )
+    # Note: eccentricity is proportional to quite a big change in argument of periapsis; so beware of it
+
+    ## Logic Check (arccos only outputs values for 0 to pi radians)
+    # Measures angle between node vector and eccentricity vector
+    # So we check with e_z -> Standard
+    if ecc_vec[2] < 0: # e_z = -ve
+        arg_per = 2 * np.pi - arg_per_raw
+    else:
+        arg_per = arg_per_raw
+
+    arg_per = np.degrees(arg_per) * u.deg
+
+    print(f"Calculated Arg. Periapsis: {arg_per:.6f}")
+
+    return arg_per
+
 
 # True Anomaly
-def getTRUE_ANOMALY(n_vec, r_vec, n_mag, r_mag):
+def getTRUE_ANOMALY(ecc_vec, r_vec, ecc, r_mag, v_vec):
     # n_vec
     # r_vec
 
     # True Anomaly
-    true_anom_raw = np.arccos(np.dot(n_vec, r_vec) / (n_mag * r_mag))
+    true_anom_raw = np.arccos(
+        np.clip(
+            np.dot(ecc_vec, r_vec) / (ecc * r_mag),
+            -1, 1
+        )
+    )
 
-    # Logic Check
-    if r_vec[2] >= 0:  # z
-        true_anom = true_anom_raw
-    else:
+    ## Logic Check (arccos only outputs values for 0 to pi radians)
+    # Measures angle between eccentricity vector and position vector
+    # So, we check with Radial Velocity (v_vec and r_vec) -> Standard
+
+    if np.dot(v_vec, r_vec) < 0:  # z
         true_anom = 2 * np.pi - true_anom_raw
+    else:
+        true_anom = true_anom_raw
 
     # Convert to degrees
     true_anom = np.degrees(true_anom) * u.deg
+
+    print(f"Calculated NU: {true_anom:.6f}")
+
     return true_anom
 
 
 ## Functions for Orbital Parameters
-RAAN, r_vec, v_vec, n_vec, r_mag, v_mag, n_mag = getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination)
-True_Anomaly = getTRUE_ANOMALY(n_vec, r_vec, n_mag, r_mag)
+print("---Orbital Parameters ---")
+RAAN, r_vec, v_vec, n_vec, r_mag, v_mag, n_mag, h_vec = getRAAN(lat_Injection, long_Injection, h_0, epoch, mu, inclination, a)
+ecc, ecc_vec = getECCEN(R_E, h_p, h_a, r_vec, v_vec, r_mag, v_mag, h_vec)
+inclination = inclination
+arg_periapsis = getARGPER(ecc_vec, ecc, n_vec, n_mag)
+True_Anomaly = getTRUE_ANOMALY(ecc_vec, r_vec, ecc, r_mag, v_vec)
 
+print(f"Calculated a: {a:.3f}")
+print(f"Calculated Inclination: {inclination:.3f}")
+
+## Orbital Parameters initialization for orbit calculations
 # Semi-Major Axis:
 a = a
 # Eccentricity:
-ecc = e
+ecc = ecc * u.one
 # Inclination
 inc = inclination
 # Right Ascension of the Ascending Node (RAAN)
@@ -289,30 +357,31 @@ arg_p = arg_periapsis
 # True Anomaly
 nu = True_Anomaly
 
+# Getting our orbit using classical orbital mechanics
 orbit = Orbit.from_classical(Earth, a, ecc, inc, raan, arg_p, nu, epoch=epoch)
 print(orbit)
 
-# Test time values: over 1 orbit, 5000 points
-days = 1
+
+print("----- SIMULATION START... -----") # Cuz don't we wanna seem smart nerds?
 
 tofs = TimeDelta(
     np.linspace(
         0 * u.s,
-        1440 * u.min,
+        P_orbit,
         5000
     )
 )
 
+# Pauses the simulation if we go below a certain altitude
 LR_val = Earth.R.to(u.km).value
-
 lithobrake_event = LithobrakeEvent(LR_val)
 events = [lithobrake_event]
-# This pauses the simulation if we go below a certain altitude
+
 
 epochs = orbit.epoch + tofs
 
 ##Formulate a grid of MSIS values by altitude, lon, and lat
-pre_run_alts = np.linspace(100, 230, 300)
+pre_run_alts = np.linspace(100, 330, 500)
 pre_run_lons = np.linspace(-180, 180, 12)
 pre_run_lats = np.linspace(-90, 90, 12)
 
@@ -341,21 +410,10 @@ get_log_rho = interp1d(
     fill_value="extrapolate"
 )
 
-# Repeat the same process for Atomic Oxygen (not present yet cuz the AO fluence part isn't implemented yet)
-AO_val_raw = msis_grid[:, :, :, :, 2]  # in atoms /m^3
-AO_avg_atoms_m3 = np.mean(AO_val_raw, axis=(0, 1, 2))
-# Log-linear interpolation
-log_AO_am3 = np.log(AO_avg_atoms_m3)
-get_log_AO_am3 = interp1d(
-    pre_run_alts,
-    log_AO_am3,
-    kind='linear',
-    fill_value="extrapolate"
-)
+### Removed Atomic Oxide Precalculations ###
 
 # Creation of empty lists for helpful byproducts
 history_times = []
-history_ao_densities = []
 history_v_rel = []
 drag_accel_list = []
 state_list = []
@@ -376,10 +434,6 @@ def atmospheric_drag_msis(t0, state):
     log_rho = get_log_rho(alt_km)
     rho = np.exp(log_rho)
 
-    # While we're here, we'll also get AO stuff as a byproduct so we don't have to do the vector math later
-    log_ao = get_log_AO_am3(alt_km)
-    ao_num_density = np.exp(log_ao)
-
     # Extract spacecraft velocity
     vx, vy, vz = state[3:6]
 
@@ -397,10 +451,9 @@ def atmospheric_drag_msis(t0, state):
 
     # Log helpful byproducts
     history_times.append(t0)
-    history_ao_densities.append(ao_num_density)
     history_v_rel.append(v_rel)
 
-    # Cross sectional area in km^2
+    # Cross-sectional area in km^2
     A_km2 = A * 1e-6  # m^2 to km^2
 
     # Relative velocity magnitude
@@ -415,8 +468,6 @@ def atmospheric_drag_msis(t0, state):
             * v_rel_mag
             * v_rel
     )
-
-    ax, ay, az = a_drag
 
     return t0, a_drag, state
 
@@ -497,7 +548,7 @@ def eclipser(t, gcrs_coords, R):
     """
     # Earth Initialization
     earth_pos = [0, 0, 0]
-    # We defined R_E before hand
+    # We defined R_E beforehand
     R_E_km = R_E.to(u.km).value  # (just in case)
 
     # Sun initialization (we do NOT need to know the radius of the Sun)
@@ -793,7 +844,7 @@ def unit_mag_vector(t0, state, R):
 
     return np.array(B_body), u_mag_vector
 
-"""
+
 def magnetic_torque(t, state, R):
     # Running unit_mag_vector to get our magnetic field values:
     B_body, u_mag_vector = unit_mag_vector(t, state, R)
@@ -816,57 +867,28 @@ def magnetic_torque(t, state, R):
 
 
     # Debugging
-    '''
-    print("B =", B_body)
-    print("B magnitude =", np.linalg.norm(B_body), "and unit vector = ", u_mag_vector)
-    '''
 
     return Tau_magnet, alignment_angle, u_mag_vector
-"""
 
-# A REALLY rough approximation of damping, where say tau_damp = -k * omega
-def damper_torque(spin_current_state):
-    # spin_current_state typically contains [omega_x, omega_y, omega_z]
-    # (or combined with quaternions depending on your state vector layout)
-    omega = spin_current_state[4:7]  # Assuming angular velocity is the first 3 elements
+def damper_torque(state, u_mag_vector, R):
+    omega = state[4:7]
 
-    # Lowball scalar damping coefficient
-    k_damp = 1e-4
+    # We only want the dampening to occur on the X and Y planes (which are perpendicular to the z-axis)
+    # This is because of how the rods will be oriented
+    # So we calculate the parallel components
 
-    # Simple proportional damping torque opposing the rotation
-    Tau_damp = -k_damp * omega
+    # Personally, I'm not sure if we need to put a R.T @ in front of u_mag_vector
+
+    omega_parallel = (np.dot(omega, (u_mag_vector))) * (u_mag_vector)
+
+    omega_perp = omega - omega_parallel
+
+    # Tau_damp is proportional to - omega
+    k_damp = 4e-5  # constant
+    
+    Tau_damp = -k_damp * omega_perp
 
     return Tau_damp
-
-def magnetic_torque(t, state, R):
-    # Running unit_mag_vector to get our magnetic field values:
-    B_body, u_mag_vector = unit_mag_vector(t, state, R)
-
-    ## Magnetic Dipole Moment of magnet (From Bill of Materials)
-    m_mag = 0.2  # Amps-m^2
-
-    # +Z face direction vector (no solar panel on this face) (face 4)
-    z_face = np.array([0, 0, 1])
-
-    m_vec_body = m_mag * z_face
-
-    # Magnetic torque = m *cross* B
-    Tau_magnet = np.cross(m_vec_body, B_body)
-
-    # Alignment angle
-    cos_angle = np.dot(m_vec_body, B_body) / (
-            np.linalg.norm(m_vec_body) * np.linalg.norm(B_body)
-    )
-    alignment_angle = math.degrees(math.acos(np.clip(cos_angle, -1.0, 1.0)))
-
-
-    # Debugging
-    '''
-    print("B =", B_body)
-    print("B magnitude =", np.linalg.norm(B_body), "and unit vector = ", u_mag_vector)
-    '''
-
-    return Tau_magnet, alignment_angle, u_mag_vector
 
 ### Functions
 def derivatives(t, T_faces, T_internal, full_current_state, Earth_cosine, Sun_cosine, sun_state):
@@ -968,14 +990,16 @@ def propagation(tofs, rr, vv):
     T_internal = 280
 
     # Lists
-    T_ext_list = []
-    T_int_list = []
-    quat_list = []
-    omega_list = []
+    t_list = [] # Time List
+    T_ext_list = [] # External Temperature List
+    T_int_list = [] # Internal Temperature List
+    quat_list = [] # Quaternion (Orientation) List
+    omega_list = [] # Angular Velocity List
     energy_history_list = []
-    cumulative_energy_joules = np.zeros(6)
-    instant_power_list = []
-    dominant_dir_list = []
+    cumulative_energy_joules = np.zeros(6) # Energy List (Cumulative)
+    instant_power_list = [] # Energy List (Instantaneous)
+    dominant_dir_list = [] # Dominant Direction List
+    angle_list = [] # Alignment Angle List
 
     t_grid = tofs.to_value(u.s)
 
@@ -1038,25 +1062,20 @@ def propagation(tofs, rr, vv):
         Tau_drag = np.cross(r_cp_cm, F_body)
 
         # Magnetic Torque (barbeque roll)
-        """
+
         Tau_magnet, alignment_angle, u_mag_vector= magnetic_torque(t, full_current_state, R)
 
         Tau_damp = damper_torque(spin_current_state, u_mag_vector, R)
+        Tau_vec = (Tau_drag + Tau_magnet + Tau_damp)
+
+
         """
-        Tau_magnet, alignment_angle, u_mag_vector = magnetic_torque(t, full_current_state, R)
-
-        Tau_damp = damper_torque(spin_current_state)
-
-        # Tau_vec = (Tau_drag)
-        Tau_vec = Tau_drag + Tau_magnet + Tau_damp
-
-        '''
         # Debugging
         print("Tau_drag =", Tau_drag)
         print("Tau_magnet =", Tau_magnet)
         print("I_tensor (det) =", np.linalg.det(I_tensor))
         print("I_tensor=", I_tensor)
-        '''
+        """
 
         ## Spin Integration
         # Instead of using euler_eq directly, we'll be using an RK4 Method for the rotational integration:
@@ -1066,12 +1085,19 @@ def propagation(tofs, rr, vv):
         quat = spin_current_state[0:4]
         omega = spin_current_state[4:7]
 
+        ## Debugging (Can comment out or remove if desired)
+        if i % 500 == 0:
+            print(
+                f"t={t:.0f}",
+                f"dt = {dt:.3f}",
+                f"|omega|={np.linalg.norm(omega):.4f}; omega={omega}"
+            )
 
         ## Debugging (Can remove if produces no output)
         if i % 500 == 0:
-            print("Drag tau:", np.linalg.norm(Tau_drag), #"Magnet tau:", np.linalg.norm(Tau_magnet),
-             "Tau:", np.linalg.norm(Tau_vec))
-            print("Drag Tau =", Tau_drag, "Tau Vector =", Tau_vec)
+            print("Drag tau:", np.linalg.norm(Tau_drag), "Magnet tau:", np.linalg.norm(Tau_magnet),
+                  "Tau Damp:", np.linalg.norm(Tau_damp), "Tau:", np.linalg.norm(Tau_vec))
+            print("Drag Tau =", Tau_drag, "Tau Vector =", Tau_vec, "Magnet Tau =", Tau_magnet, "Dampening Tau =", Tau_damp)
 
         ## Debugging (Can remove if produces no output)
         if not np.all(np.isfinite(omega)):
@@ -1080,13 +1106,6 @@ def propagation(tofs, rr, vv):
             print('dt=',dt)
             print('omega=',omega)
             break
-
-        ## Debugging (Can comment out or remove if desired)
-        if i % 500 == 0:
-            print(
-                f"t={t:.0f}",
-                f"|omega|={np.linalg.norm(omega):.4f}; omega={omega}"
-            )
 
         # Debugging (Can remove if desired)
         if i % 500 == 0:
@@ -1099,13 +1118,13 @@ def propagation(tofs, rr, vv):
             print('quat=', quat)
             break
 
-        """
+
         # Printing Alignment angle:
         if i % 500 == 0:
             print(
                 f"Alignment Angle at t = {t:.0f} is {alignment_angle:.2f} degrees"
             )
-        """
+
 
         # spin values required for both derivatives() and calculating drag_force in the body frame
         Earth_cosine, Sun_cosine, sun_state, R = spin_sun_earth(t, quat, gcrs_coords)
@@ -1135,17 +1154,17 @@ def propagation(tofs, rr, vv):
         # (1 Watt-hour = 3,600 Joules)
         cumulative_energy_wh = cumulative_energy_joules / 3600.0
 
-        #Dominant rotation direction at any given time -- time series list
+        # Dominant rotation direction at any given time -- time series list
         om = omega.copy()
         wx, wy, wz = om
+        wx_abs, wy_abs, wz_abs = np.abs(wx), np.abs(wy), np.abs(wz)
 
-        #Key: Dominant direction 1 is wx is dominant, 2 for wy, and 3 for wz
-
-        if wx > wy and wx > wz:
+        # Key: Dominant direction 1 is wx is dominant, 2 for wy, and 3 for wz
+        if wx_abs > wy_abs and wx_abs > wz_abs:
             dominant_direction = 1
-        elif wy>wx and wy>wz:
+        elif wy_abs > wx_abs and wy_abs > wz_abs:
             dominant_direction = 2
-        elif wz>wy and wy>wx:
+        elif wz_abs > wy_abs and wz_abs > wx_abs:
             dominant_direction = 3
 
 
@@ -1153,18 +1172,21 @@ def propagation(tofs, rr, vv):
         ''' So apparently there's a bug ("") in numpy, where if you were to append a numpy list, it might change the previous quantity
         This is because numpy lists are mutable, and refer to the id of the object, not the value. Just to be on the safe side, we'll be
         using .copy(). This doesn't change any values; it's just a precaution.'''
+        t_list.append(t.copy())
         T_ext_list.append(T_faces.copy())
         T_int_list.append(float(T_internal))
         quat_list.append(quat.copy())
         omega_list.append(omega.copy())
         energy_history_list.append(cumulative_energy_wh.copy())
         dominant_dir_list.append(dominant_direction)
+        angle_list.append(alignment_angle)
 
-    return np.array(T_ext_list), np.array(T_int_list), omega_list, np.array(energy_history_list), np.array(instant_power_list), np.array(dominant_dir_list), np.array(quat_list)
+    return np.array(t_list), np.array(T_ext_list), np.array(T_int_list), np.array(omega_list), np.array(energy_history_list), np.array(instant_power_list), np.array(dominant_dir_list), np.array(angle_list)
+
 
 
 ### Running the Thermal Model (AFTER integrating f function)
-T_ext, T_int, omega, energy_history_list, instant_pwr_history, dominant_direction_history, quat_history = propagation(tofs, rr, vv)
+t_list, T_ext, T_int, omega_list, energy_history_list, instant_pwr_history, dominant_direction_history, angle_list = propagation(tofs, rr, vv)
 
 ### Maximum and Minimum Temperatures
 # External panels
@@ -1317,7 +1339,7 @@ altitude = np.linalg.norm(
 
 print("Max Altitude:", np.max(altitude), "And Min Altitude:", np.min(altitude))
 
-# Power generation per face plot
+# --- FIRST PLOT: Cumulative Power ---
 face_names = ["+X Face", "-X Face", "+Y Face", "-Y Face", "+Z Face", "-Z Face"]
 fig, axes = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
 axes = axes.flatten()  # Flattens the 3x2 grid into a simple 1D array of 6 axes
@@ -1350,16 +1372,10 @@ print("Power generated by", face_names[3], ":", f"{energy_history_list[-1, 3]:.4
 print("Power generated by", face_names[4], ":", f"{energy_history_list[-1, 4]:.4f} Wh")
 print("Power generated by", face_names[5], ":", f"{energy_history_list[-1, 5]:.4f} Wh")
 
-print("Power generated by", face_names[0], ":", f"{energy_history_list[-1, 0]:.4f} Wh")
-print("Power generated by", face_names[1], ":", f"{energy_history_list[-1, 1]:.4f} Wh")
-print("Power generated by", face_names[2], ":", f"{energy_history_list[-1, 2]:.4f} Wh")
-print("Power generated by", face_names[3], ":", f"{energy_history_list[-1, 3]:.4f} Wh")
-print("Power generated by", face_names[4], ":", f"{energy_history_list[-1, 4]:.4f} Wh")
-print("Power generated by", face_names[5], ":", f"{energy_history_list[-1, 5]:.4f} Wh")
-
 # Time axis (skipping the first history time since the loop starts at index 1)
 time_grid = tofs.to_value(u.s)
 time_axis = time_grid[1:]
+
 
 # --- 2. SECOND PLOT: Instantaneous Power ---
 fig2, axes2 = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
@@ -1376,7 +1392,8 @@ axes2[5].set_xlabel("Time (s)")
 plt.tight_layout()
 plt.show()
 
-# --- 3. THIRD PLOT: Dominant Direction. Remember the key from earlier, same applies.
+
+## --- 3. THIRD PLOT: Dominant Direction. Remember the key from earlier, same applies. ---
 time_grid = tofs.to_value(u.s)
 time_axis = time_grid[1:]
 
@@ -1389,8 +1406,35 @@ axes3.grid(True)
 axes3.legend()
 plt.show()
 
-#
-# # -- 4. Fourth item: 3d vector visualization thingy
+
+## --- 4. FOURTH PLOT: Angular Velocity ---
+plt.figure(figsize=(12,10))
+
+plt.plot(t_list[:len(omega_list)], omega_list[:,0], label='wx')
+plt.plot(t_list[:len(omega_list)], omega_list[:,1], label='wy')
+plt.plot(t_list[:len(omega_list)], omega_list[:,2], label='wz')
+
+plt.title("Angular Velocity Components")
+plt.xlabel("Time (s)")
+plt.ylabel("Angular Velocity (rads/s)")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+## --- FIFTH PLOT: Alignment Angle ---
+plt.figure(figsize=(12,10))
+
+plt.plot(t_list[:len(angle_list)], angle_list)
+
+plt.title("Alignment Angle")
+plt.xlabel("Time (s)")
+plt.ylabel("Alignment Angle (Degrees)")
+plt.grid(True)
+plt.show()
+
+
+"""
+# # -- SIXTH PLOT: 3d vector visualization thingy
 # time_grid = tofs.to_value(u.s)
 # time_axis = time_grid[1:]
 #
@@ -1431,14 +1475,17 @@ plt.show()
 # axes4.set_ylabel("y")
 # axes4.set_zlabel("z")
 #
-# """
+# '''
 # Construction Reference for how many frames we need to keep everything synced
 # time_grid = tofs.to_value(u.s)
 # time_axis = time_grid[1:]
 #
 # The propogation loop didn't run for the 'initial' state, so quat_history should have one less item that tofs. Hopefully
 # this allows for time_axis and quat_history to be called together with the same 'i' indicator, since FuncAnimation
-# doesn't start at frame 0 either, I hope."""
+# doesn't start at frame 0 either, I hope.'''
 #
 # anim = FuncAnimation(fig4, update, frames=time_axis, interval=50, repeat=False, blit=True)
-#
+"""
+
+print("-----SIMULATION END-----") # Cuz don't we wanna seem like smart hackers?
+# ;)
