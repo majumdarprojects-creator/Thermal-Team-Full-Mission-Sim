@@ -42,6 +42,8 @@ SOLAR_ CONDITION_FACTOR = An aggregate for conditions external to satellite func
 We will implement tumbling along 3 axes for our incidence angle calculations
 After the simulation, we would sum up the powers of any two non-touching sides, excluding z faces, and that is the total power generated per orbit in Wh
 
-After testing harsh conditions, with a solar condition modifier of 0.4 and a solar panel efficiency of 0.2, we have concluded a net power generation of 0.3316 to 0.346 Wh per orbit, not factoring in energy storage and other qualifications that may affect how much “real” power is available for WS2 to use.
+After testing harsh conditions, with a solar condition modifier of 0.75 and a solar panel efficiency of 0.2, we have concluded a net power generation of 0.62 to 0.6272 Wh per orbit, not factoring in energy storage and other qualifications that may affect how much “real” power is available for WS2 to use. In the case of having four solar panels, it would be approximately 1.293 Wh per orbit. 
+
+This model was extremely helpful in justifying the purchase of two additional solar panels for WS2 usage.
 
 These factors can be changed to suit your modelling needs.
